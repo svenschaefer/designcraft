@@ -7,7 +7,50 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use serde_json::Value;
 
-use crate::{EngineError, Result, Session};
+use crate::{DocState, EngineError, Result, Session};
+
+/// Document state and command bookkeeping commit together, including nested commands.
+struct CommandSnapshot {
+    docs: Vec<DocState>,
+    active: Option<usize>,
+    journal_len: usize,
+    requests_len: usize,
+    transforms: (Vec<(String, Value)>, Vec<designcraft_doc::ItemId>, bool),
+    loaded: Option<(designcraft_doc::AssetId, (f64, f64))>,
+    untitled: u32,
+}
+
+impl CommandSnapshot {
+    fn new(session: &Session) -> Self {
+        Self {
+            docs: session.docs.clone(),
+            active: session.active,
+            journal_len: session.journal.len(),
+            requests_len: session.ui_requests.len(),
+            transforms: session.transforms.clone(),
+            loaded: session.loaded,
+            untitled: session.untitled,
+        }
+    }
+
+    fn restore(mut self, session: &mut Session) {
+        // Invalidate views of changed documents while keeping the saved/dirty and history state.
+        for before in &mut self.docs {
+            if let Some(current) = session.docs.iter().find(|d| d.uid == before.uid)
+                && (current.revision != before.revision || !std::sync::Arc::ptr_eq(&current.doc, &before.doc))
+            {
+                before.revision = before.revision.max(current.revision).saturating_add(1);
+            }
+        }
+        session.docs = self.docs;
+        session.active = self.active;
+        session.journal.truncate(self.journal_len);
+        session.ui_requests.truncate(self.requests_len);
+        session.transforms = self.transforms;
+        session.loaded = self.loaded;
+        session.untitled = self.untitled;
+    }
+}
 
 /// Text of a panic payload (`panic!` with a literal or a formatted message).
 pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -35,20 +78,16 @@ pub fn install_panic_hook() {
 impl Session {
     /// Run command `id` (`f`) inside the guard.
     pub(crate) fn guarded(&mut self, id: &str, f: impl FnOnce(&mut Session) -> Result<Value>) -> Result<Value> {
-        let before = self.active().map(|d| (d.uid, d.doc.clone(), d.selection.clone(), d.revision));
+        let before = CommandSnapshot::new(self);
         match catch_unwind(AssertUnwindSafe(|| f(self))) {
-            Ok(r) => r,
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => {
+                before.restore(self);
+                Err(error)
+            }
             Err(payload) => {
                 let msg = panic_message(payload.as_ref());
-                // Keep the document as it was before the command.
-                if let (Some((uid, doc, selection, revision)), Some(st)) = (before, self.active_mut())
-                    && st.uid == uid
-                {
-                    st.doc = doc;
-                    st.selection = selection;
-                    st.interaction = None;
-                    st.revision = revision.max(st.revision).saturating_add(1);
-                }
+                before.restore(self);
                 if let Some(dir) = self.recovery_dir.clone()
                     && let Err(e) = crate::recovery::save(self, &dir)
                 {
@@ -85,5 +124,86 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&st.doc, &before), "the document is the one from before the command");
         // The session keeps working.
         s.execute("frame.create", &json!({"rect": [36, 236, 200, 400]})).unwrap();
+    }
+
+    fn session_with_redo() -> Session {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        s.execute("frame.create", &json!({"rect": [36, 36, 200, 200], "content": "text", "text": "keep me"})).unwrap();
+        s.execute("frame.create", &json!({"rect": [36, 236, 200, 400]})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        s
+    }
+
+    fn assert_history_kept(s: &Session, before: &crate::DocState) {
+        let after = s.active().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&before.doc, &after.doc));
+        assert!(std::sync::Arc::ptr_eq(&before.saved_doc, &after.saved_doc));
+        assert_eq!(after.is_dirty(), before.is_dirty());
+        for (old, new) in [(&before.history.undo, &after.history.undo), (&before.history.redo, &after.history.redo)] {
+            assert_eq!(old.len(), new.len());
+            for (a, b) in old.iter().zip(new) {
+                assert_eq!(a.label, b.label);
+                assert!(std::sync::Arc::ptr_eq(&a.doc, &b.doc));
+            }
+        }
+    }
+
+    #[test]
+    fn panic_after_two_nested_edits_keeps_undo_redo_and_journal() {
+        let mut s = session_with_redo();
+        let before = s.active().unwrap().clone();
+        let journal = s.journal.clone();
+        let undo_target = before.history.undo.last().unwrap().doc.clone();
+        let error = s
+            .guarded("test.two-edits", |s| {
+                for y in [236, 436] {
+                    s.execute("frame.create", &json!({"rect": [36, y, 200, y + 164]}))?;
+                }
+                panic!("after nested edits");
+            })
+            .unwrap_err();
+        assert!(matches!(error, crate::EngineError::Internal(_, _)));
+        assert_history_kept(&s, &before);
+        assert_eq!(s.journal, journal);
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&s.active().unwrap().doc, &undo_target));
+        s.execute("edit.redo", &json!({})).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&s.active().unwrap().doc, &before.doc));
+    }
+
+    #[test]
+    fn ordinary_failure_after_nested_edits_also_rolls_back() {
+        let mut s = session_with_redo();
+        let before = s.active().unwrap().clone();
+        let journal = s.journal.clone();
+        assert!(
+            s.guarded("test.error", |s| {
+                s.execute("frame.create", &json!({"rect": [0, 0, 100, 100]}))?;
+                Err(crate::EngineError::Other("reject compound edit".into()))
+            })
+            .is_err()
+        );
+        assert_history_kept(&s, &before);
+        assert_eq!(s.journal, journal);
+    }
+
+    #[test]
+    fn panic_after_a_document_switch_restores_the_document_list_and_active_document() {
+        let mut s = session_with_redo();
+        let before = s.active().unwrap().clone();
+        let active = s.active;
+        let count = s.docs.len();
+        let untitled = s.untitled;
+        let _ = s.guarded("test.switch", |s| {
+            s.execute("file.new", &json!({}))?;
+            s.docs.remove(0);
+            s.active = Some(0);
+            panic!("after switching documents");
+        });
+        assert_eq!(s.docs.len(), count);
+        assert_eq!(s.active, active);
+        assert_eq!(s.untitled, untitled);
+        assert_history_kept(&s, &before);
     }
 }

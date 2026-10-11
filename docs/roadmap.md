@@ -1,6 +1,6 @@
 # DesignCraft roadmap (detail)
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (stage re-normalized to pre-alpha by the core-workflow gate; earlier today: major, milestones re-assessed; beta plan from the full re-measure) · **Target:** Adobe InDesign 2026 (21.6)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-11 · **Change:** minor (import/transaction hardening and PR quality checks documented; milestone estimates unchanged) · **Target:** Adobe InDesign 2026 (21.6)
 
 Forward-looking plan. The one-page summary is [ROADMAP.md](../ROADMAP.md); numbers are in
 [target-app-parity.md](target-app-parity.md); the work list is [gaps.md](gaps.md). Hours are
@@ -31,6 +31,10 @@ of the alpha gate: IDML works both ways today and INDD is gap 2.
 the ~40% alpha bar.
 
 ## Current focus
+
+Reliability work: bounded IDML imports, document-history rollback and the general PR gate
+are implemented locally; see [quality checks](quality-checks.md). The first GitHub matrix
+run is pending publication. This work does not change the milestone estimates below.
 
 In order. Each closes a beta blocker from [gaps.md](gaps.md).
 
@@ -110,6 +114,7 @@ output intent · EPS place") is done except Books depth and EPS (preview only).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-11 | minor | Documented import/transaction hardening and local PR gate implementation |
 | 2026-10-10 | trivial | Ready figure 42% → 47% (method aligned with the standard); beta distance 28 points |
 | 2026-10-10 | minor | Alpha gate table added (6 core workflows); gate fails on manual threading, stage pre-alpha; A1 milestone and focus item 0 |
 | 2026-10-10 | major | Created: milestones moved from ROADMAP.md and re-assessed; Current focus and the beta plan from the full re-measure |

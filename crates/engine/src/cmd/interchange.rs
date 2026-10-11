@@ -129,12 +129,29 @@ fn read_packaged_link(link: &str, dir: Option<&std::path::Path>) -> Option<(Stri
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn read_idml_file(path: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let limit = designcraft_idml::ImportLimits::default().max_archive_bytes as u64;
+    let file = std::fs::File::open(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    if file.metadata().map_err(|e| EngineError::Other(format!("{path}: {e}")))?.len() > limit {
+        return Err(bad("file.openIdml", "compressed IDML package exceeds the import budget"));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    if bytes.len() as u64 > limit {
+        return Err(bad("file.openIdml", "compressed IDML package exceeds the import budget"));
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn open_idml(s: &mut Session, p: &Value) -> Result<Value> {
     let (bytes, dir, name) = if let Some(b) = str_param(p, "base64") {
         (base64_decode(b), None, str_param(p, "name").map(|n| n.trim_end_matches(".idml").to_string()))
     } else if let Some(path) = str_param(p, "path") {
         #[cfg(not(target_arch = "wasm32"))]
-        let b = std::fs::read(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        let b = read_idml_file(path)?;
         #[cfg(target_arch = "wasm32")]
         let b: Vec<u8> = Vec::new();
         let pp = std::path::Path::new(path);

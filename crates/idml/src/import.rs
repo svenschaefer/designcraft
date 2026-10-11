@@ -48,19 +48,69 @@ fn default_reader(path: &str) -> Option<Vec<u8>> {
 
 /// Import with a custom reader for linked files (`path` → bytes).
 pub fn import_idml_with(bytes: &[u8], read_link: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Document> {
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| IdmlError::NotIdml(e.to_string()))?;
+    import_idml_with_limits(bytes, read_link, ImportLimits::default())
+}
+
+/// Budgets for the compressed package and its actual decompressed contents.
+/// Linked files supplied by the caller are outside these package budgets.
+#[derive(Clone, Copy, Debug)]
+pub struct ImportLimits {
+    pub max_archive_bytes: usize,
+    pub max_entries: usize,
+    pub max_part_bytes: usize,
+    pub max_total_bytes: usize,
+}
+
+impl Default for ImportLimits {
+    fn default() -> Self {
+        Self { max_archive_bytes: 512 << 20, max_entries: 10_000, max_part_bytes: 256 << 20, max_total_bytes: 512 << 20 }
+    }
+}
+
+fn read_part(reader: &mut impl Read, name: &str, declared: u64, limit: usize) -> Result<Vec<u8>> {
+    let limit64 = u64::try_from(limit).map_err(|_| IdmlError::Invalid("IDML byte limit is too large".into()))?;
+    if declared > limit64 {
+        return Err(IdmlError::Part { part: name.into(), msg: format!("uncompressed size exceeds the {limit}-byte import budget") });
+    }
+    let probe = limit64.checked_add(1).ok_or_else(|| IdmlError::Invalid("IDML byte limit is too large".into()))?;
+    // Stream bytes without reserving from an untrusted ZIP size declaration.
+    let mut buf = Vec::new();
+    reader.take(probe).read_to_end(&mut buf).map_err(|e| IdmlError::Part { part: name.into(), msg: e.to_string() })?;
+    if buf.len() > limit {
+        return Err(IdmlError::Part { part: name.into(), msg: format!("uncompressed size exceeds the {limit}-byte import budget") });
+    }
+    buf.shrink_to_fit();
+    Ok(buf)
+}
+
+fn read_package(bytes: &[u8], limits: ImportLimits) -> Result<HashMap<String, Vec<u8>>> {
+    if bytes.len() > limits.max_archive_bytes {
+        return Err(IdmlError::NotIdml(format!("package exceeds the {}-byte import budget", limits.max_archive_bytes)));
+    }
+    let mut zip = crate::zip_budget::open(bytes, limits.max_entries)?;
+    if zip.len() > limits.max_entries {
+        return Err(IdmlError::NotIdml(format!("package exceeds the {}-entry import budget", limits.max_entries)));
+    }
     let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut total = 0usize;
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).map_err(|e| IdmlError::NotIdml(e.to_string()))?;
         if f.is_dir() {
             continue;
         }
         let name = f.name().to_string();
-        // The size is what the archive claims: don't reserve more than a sane part up front.
-        let mut buf = Vec::with_capacity((f.size() as usize).min(1 << 24));
-        f.read_to_end(&mut buf).map_err(|e| IdmlError::Part { part: name.clone(), msg: e.to_string() })?;
+        let remaining = limits.max_total_bytes.saturating_sub(total);
+        let size = f.size();
+        let buf = read_part(&mut f, &name, size, limits.max_part_bytes.min(remaining))?;
+        total = total.checked_add(buf.len()).ok_or_else(|| IdmlError::Invalid("IDML package size overflow".into()))?;
         files.insert(name, buf);
     }
+    Ok(files)
+}
+
+/// Import with explicit package budgets, including unreferenced parts.
+pub fn import_idml_with_limits(bytes: &[u8], read_link: &dyn Fn(&str) -> Option<Vec<u8>>, limits: ImportLimits) -> Result<Document> {
+    let files = read_package(bytes, limits)?;
     if let Some(m) = files.get("mimetype")
         && String::from_utf8_lossy(m).trim() != MIMETYPE
     {
@@ -2561,3 +2611,7 @@ pub(crate) fn uri_to_path(uri: &str) -> String {
     }
     String::from_utf8_lossy(&out).to_string()
 }
+
+#[cfg(test)]
+#[path = "import_budget_tests.rs"]
+mod budget_tests;

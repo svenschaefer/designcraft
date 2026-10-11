@@ -44,12 +44,13 @@ mod export;
 mod import;
 mod names;
 mod xml;
+mod zip_budget;
 
 #[cfg(test)]
 mod tests;
 
 pub use export::{ExportOptions, export_idml, export_idml_with};
-pub use import::{import_idml, import_idml_with};
+pub use import::{ImportLimits, import_idml, import_idml_with, import_idml_with_limits};
 
 /// The IDML package mimetype (content of the first, stored `mimetype` entry).
 pub const MIMETYPE: &str = "application/vnd.adobe.indesign-idml-package";

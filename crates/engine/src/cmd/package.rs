@@ -727,6 +727,7 @@ mod tests {
     #[test]
     fn package_refuses_windows_directory_redirects() {
         use std::os::windows::fs::symlink_dir;
+        use std::os::windows::process::CommandExt;
 
         let base = std::env::temp_dir().join(format!("dc-package-windows-redirect-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -735,9 +736,20 @@ mod tests {
         let redirected = base.join("Package");
         match symlink_dir(&outside, &redirected) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                let _ = std::fs::remove_dir_all(&base);
-                return;
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(1314) => {
+                // Junctions exercise the redirect guard without requiring the symlink privilege.
+                let output = std::process::Command::new("cmd.exe")
+                    .current_dir(&base)
+                    .args(["/d", "/c", "mklink", "/J", "Package", "separate"])
+                    .creation_flags(0x08000000)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "could not create directory junction: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
             Err(e) => panic!("could not create directory redirect: {e}"),
         }

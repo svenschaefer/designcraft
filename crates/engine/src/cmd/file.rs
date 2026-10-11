@@ -430,7 +430,11 @@ pub(crate) fn read_source(p: &Value) -> Result<(Vec<u8>, String, Option<String>)
     }
     let path = str_param(p, "path").ok_or_else(|| bad("place", "missing `path` or `base64`"))?;
     #[cfg(not(target_arch = "wasm32"))]
-    let b = std::fs::read(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    let b = if path.to_ascii_lowercase().ends_with(".idml") {
+        super::interchange::read_idml_file(path)?
+    } else {
+        std::fs::read(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?
+    };
     #[cfg(target_arch = "wasm32")]
     let b: Vec<u8> = vec![];
     let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.into());
@@ -637,7 +641,7 @@ fn file_revert(s: &mut Session, _: &Value) -> Result<Value> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let mut d = if path.to_ascii_lowercase().ends_with(".idml") {
-            let bytes = std::fs::read(&path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+            let bytes = super::interchange::read_idml_file(&path)?;
             designcraft_idml::import_idml(&bytes).map_err(|e| EngineError::Other(e.to_string()))?
         } else {
             from_bytes(&std::fs::read(&path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?)?
